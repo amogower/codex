@@ -1,3 +1,4 @@
+pub mod pool;
 mod storage;
 
 use async_trait::async_trait;
@@ -1008,7 +1009,13 @@ impl AuthManager {
     pub fn reload(&self) -> bool {
         tracing::info!("Reloading auth");
         let new_auth = self.load_auth_from_storage();
-        self.set_cached_auth(new_auth)
+        let changed = self.set_cached_auth(new_auth);
+        if let Err(err) = crate::auth::pool::AccountPool::new(self.codex_home.clone())
+            .sync_active_profile_from_active_store(self.auth_credentials_store_mode)
+        {
+            tracing::warn!("Account pool sync failed: {err}");
+        }
+        changed
     }
 
     fn reload_if_account_id_matches(&self, expected_account_id: Option<&str>) -> ReloadOutcome {

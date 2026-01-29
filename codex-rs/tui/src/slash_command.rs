@@ -33,6 +33,7 @@ pub enum SlashCommand {
     Diff,
     Mention,
     Status,
+    Accounts,
     Mcp,
     Apps,
     Logout,
@@ -63,6 +64,7 @@ impl SlashCommand {
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Accounts => "switch between ChatGPT accounts in your account pool",
             SlashCommand::Ps => "list background terminals",
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Personality => "choose a communication style for Codex",
@@ -103,6 +105,7 @@ impl SlashCommand {
             | SlashCommand::ElevateSandbox
             | SlashCommand::Experimental
             | SlashCommand::Review
+            | SlashCommand::Accounts
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Rename
