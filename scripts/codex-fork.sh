@@ -36,8 +36,29 @@ Examples:
 EOF
 }
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+resolve_self() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "${src}" ]]; do
+    local dir
+    dir="$(cd "$(dirname "${src}")" && pwd)"
+    src="$(readlink "${src}")"
+    if [[ "${src}" != /* ]]; then
+      src="${dir}/${src}"
+    fi
+  done
+  echo "${src}"
+}
+
+script_path="$(resolve_self)"
+script_dir="$(cd "$(dirname "${script_path}")" && pwd)"
+
+repo_root="${CODEX_FORK_REPO_ROOT:-}"
+if [[ -z "${repo_root}" ]]; then
+  repo_root="$(git -C "${script_dir}" rev-parse --show-toplevel 2>/dev/null || true)"
+fi
+if [[ -z "${repo_root}" ]]; then
+  repo_root="$(cd "${script_dir}/.." && pwd)"
+fi
 codex_rs_dir="${repo_root}/codex-rs"
 
 sync=1
@@ -161,4 +182,3 @@ if [[ ! -x "${bin}" ]]; then
 fi
 
 exec "${bin}" "$@"
-
