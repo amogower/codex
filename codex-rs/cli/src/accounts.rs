@@ -51,11 +51,11 @@ struct AddArgs {
     name: String,
 
     /// Use the device code login flow (helpful on remote/headless machines).
-    #[arg(long = "device-auth")]
+    #[arg(long = "device-auth", conflicts_with = "with_api_key")]
     device_auth: bool,
 
     /// Store an API key profile (read key from stdin).
-    #[arg(long = "with-api-key")]
+    #[arg(long = "with-api-key", conflicts_with = "device_auth")]
     with_api_key: bool,
 
     /// Do not switch the active account after adding/updating this profile.
