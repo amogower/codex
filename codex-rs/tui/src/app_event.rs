@@ -104,17 +104,17 @@ pub(crate) enum AppEvent {
     /// Result of prefetching connectors.
     ConnectorsLoaded(Result<ConnectorsSnapshot, String>),
 
-    /// Prefill composer text.
-    PrefillComposer {
-        text: String,
-    },
-
     /// Begin adding a ChatGPT account to the pool.
     StartAccountAdd {
         name: String,
         method: AccountAddMethod,
         overwrite: bool,
         set_active: bool,
+    },
+
+    /// Begin adding a ChatGPT account to the pool with an auto-derived name.
+    StartAccountAddInteractive {
+        method: AccountAddMethod,
     },
 
     /// Emit a status line during account add.

@@ -566,6 +566,65 @@ pub(crate) struct App {
     pending_primary_events: VecDeque<Event>,
 }
 
+fn derive_profile_name(auth: &codex_core::auth::AuthDotJson) -> String {
+    let email = auth
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.id_token.email.as_ref())
+        .cloned()
+        .unwrap_or_else(|| "chatgpt".to_string());
+    sanitize_profile_name(&email)
+}
+
+fn sanitize_profile_name(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for c in raw.chars() {
+        let next = if c.is_ascii_alphanumeric() || c == '_' {
+            Some(c.to_ascii_lowercase())
+        } else {
+            Some('-')
+        };
+        if let Some(ch) = next {
+            if ch == '-' {
+                if last_dash || out.is_empty() {
+                    continue;
+                }
+                last_dash = true;
+            } else {
+                last_dash = false;
+            }
+            out.push(ch);
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "chatgpt".to_string()
+    } else {
+        out
+    }
+}
+
+fn unique_profile_name(pool: &AccountPool, base: &str) -> std::io::Result<String> {
+    let (_, profiles) = pool.list_profiles()?;
+    let used: std::collections::HashSet<String> = profiles.into_iter().map(|p| p.name).collect();
+    if !used.contains(base) {
+        return Ok(base.to_string());
+    }
+    for idx in 2..=1000 {
+        let candidate = format!("{base}-{idx}");
+        if !used.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("Unable to find an available profile name for '{base}'."),
+    ))
+}
+
 #[derive(Default)]
 struct WindowsSandboxState {
     setup_started_at: Option<Instant>,
@@ -1543,11 +1602,6 @@ impl App {
             AppEvent::ConnectorsLoaded(result) => {
                 self.chat_widget.on_connectors_loaded(result);
             }
-            AppEvent::PrefillComposer { text } => {
-                self.chat_widget
-                    .set_composer_text(String::new(), Vec::new(), Vec::new());
-                self.chat_widget.insert_str(text.as_str());
-            }
             AppEvent::StartAccountAdd {
                 name,
                 method,
@@ -1684,6 +1738,186 @@ impl App {
                     });
                 });
             }
+            AppEvent::StartAccountAddInteractive { method } => {
+                let config = self.config.clone();
+                let app_event_tx = self.app_event_tx.clone();
+                let auth_manager = self.auth_manager.clone();
+                tokio::spawn(async move {
+                    if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: "chatgpt".to_string(),
+                            set_active: true,
+                            result: Err("ChatGPT login is disabled in this workspace.".to_string()),
+                        });
+                        return;
+                    }
+
+                    let pool = AccountPool::new(config.codex_home.clone());
+                    let pending_name = format!("pending-{}", rand::random::<u32>());
+                    let pending_home = match pool.profile_codex_home(&pending_name) {
+                        Ok(home) => home,
+                        Err(err) => {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: "chatgpt".to_string(),
+                                set_active: true,
+                                result: Err(err.to_string()),
+                            });
+                            return;
+                        }
+                    };
+
+                    let mut opts = ServerOptions::new(
+                        pending_home.clone(),
+                        CLIENT_ID.to_string(),
+                        config.forced_chatgpt_workspace_id.clone(),
+                        codex_core::auth::AuthCredentialsStoreMode::File,
+                    );
+
+                    let login_result = match method {
+                        crate::app_event::AccountAddMethod::Browser => {
+                            let server = match run_login_server(opts) {
+                                Ok(server) => server,
+                                Err(err) => {
+                                    app_event_tx.send(AppEvent::AccountAddFinished {
+                                        name: "chatgpt".to_string(),
+                                        set_active: true,
+                                        result: Err(err.to_string()),
+                                    });
+                                    return;
+                                }
+                            };
+                            app_event_tx.send(AppEvent::AccountAddStatus {
+                                message: format!(
+                                    "Starting login server on http://localhost:{}.\nIf your browser did not open, navigate to this URL:\n{}",
+                                    server.actual_port, server.auth_url
+                                ),
+                                is_error: false,
+                            });
+                            server.block_until_done().await
+                        }
+                        crate::app_event::AccountAddMethod::DeviceCode => {
+                            opts.open_browser = false;
+                            let device_code = match request_device_code(&opts).await {
+                                Ok(code) => code,
+                                Err(err) => {
+                                    app_event_tx.send(AppEvent::AccountAddFinished {
+                                        name: "chatgpt".to_string(),
+                                        set_active: true,
+                                        result: Err(err.to_string()),
+                                    });
+                                    return;
+                                }
+                            };
+                            app_event_tx.send(AppEvent::AccountAddStatus {
+                                message: format!(
+                                    "Open {} and enter the one-time code: {}",
+                                    device_code.verification_url, device_code.user_code
+                                ),
+                                is_error: false,
+                            });
+                            complete_device_code_login(opts, device_code).await
+                        }
+                    };
+
+                    if let Err(err) = login_result {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: "chatgpt".to_string(),
+                            set_active: true,
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+
+                    let auth = match codex_core::auth::load_auth_dot_json(
+                        &pending_home,
+                        codex_core::auth::AuthCredentialsStoreMode::File,
+                    ) {
+                        Ok(Some(auth)) => auth,
+                        Ok(None) => {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: "chatgpt".to_string(),
+                                set_active: true,
+                                result: Err("No auth credentials were stored.".to_string()),
+                            });
+                            return;
+                        }
+                        Err(err) => {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: "chatgpt".to_string(),
+                                set_active: true,
+                                result: Err(err.to_string()),
+                            });
+                            return;
+                        }
+                    };
+
+                    let base_name = derive_profile_name(&auth);
+                    let final_name = match unique_profile_name(&pool, &base_name) {
+                        Ok(name) => name,
+                        Err(err) => {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: base_name.clone(),
+                                set_active: true,
+                                result: Err(err.to_string()),
+                            });
+                            return;
+                        }
+                    };
+
+                    let profile_home = match pool.profile_codex_home(&final_name) {
+                        Ok(home) => home,
+                        Err(err) => {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: base_name.clone(),
+                                set_active: true,
+                                result: Err(err.to_string()),
+                            });
+                            return;
+                        }
+                    };
+
+                    if let Err(err) = codex_core::auth::save_auth(
+                        &profile_home,
+                        &auth,
+                        codex_core::auth::AuthCredentialsStoreMode::File,
+                    ) {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: base_name.clone(),
+                            set_active: true,
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+
+                    if let Err(err) = pool.upsert_profile(&final_name, true) {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: final_name.clone(),
+                            set_active: true,
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+
+                    if let Err(err) =
+                        pool.set_active_profile(&final_name, config.cli_auth_credentials_store_mode)
+                    {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: final_name.clone(),
+                            set_active: true,
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+
+                    let _ = std::fs::remove_dir_all(pending_home);
+                    auth_manager.reload();
+                    app_event_tx.send(AppEvent::AccountAddFinished {
+                        name: final_name,
+                        set_active: true,
+                        result: Ok(()),
+                    });
+                });
+            }
             AppEvent::AccountAddStatus { message, is_error } => {
                 if is_error {
                     self.chat_widget.add_error_message(message);
@@ -1699,10 +1933,8 @@ impl App {
                 Ok(()) => {
                     if set_active {
                         self.chat_widget.on_auth_changed();
-                        self.chat_widget.add_info_message(
-                            format!("Saved and activated account '{name}'."),
-                            None,
-                        );
+                        self.chat_widget
+                            .add_info_message(format!("Account '{name}' is ready to use."), None);
                     } else {
                         self.chat_widget
                             .add_info_message(format!("Saved account '{name}'."), None);

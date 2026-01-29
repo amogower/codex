@@ -2833,6 +2833,10 @@ impl ChatWidget {
                             set_active,
                         });
                     }
+                    Ok(AccountsCommand::AddInteractive { method }) => {
+                        self.app_event_tx
+                            .send(AppEvent::StartAccountAddInteractive { method });
+                    }
                     Ok(AccountsCommand::Use { name }) => {
                         self.app_event_tx
                             .send(AppEvent::SwitchAccountPoolProfile { name });
@@ -3617,12 +3621,8 @@ impl ChatWidget {
         let mut items: Vec<SelectionItem> = Vec::new();
 
         let add_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
-            tx.send(AppEvent::PrefillComposer {
-                text: "/accounts add ".to_string(),
-            });
-            tx.send(AppEvent::AccountAddStatus {
-                message: "Type a profile name and press Enter to start browser login.".to_string(),
-                is_error: false,
+            tx.send(AppEvent::StartAccountAddInteractive {
+                method: AccountAddMethod::Browser,
             });
         })];
         items.push(SelectionItem {
@@ -3634,13 +3634,8 @@ impl ChatWidget {
         });
 
         let add_device_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
-            tx.send(AppEvent::PrefillComposer {
-                text: "/accounts add --device-auth ".to_string(),
-            });
-            tx.send(AppEvent::AccountAddStatus {
-                message: "Type a profile name and press Enter to start device-code login."
-                    .to_string(),
-                is_error: false,
+            tx.send(AppEvent::StartAccountAddInteractive {
+                method: AccountAddMethod::DeviceCode,
             });
         })];
         items.push(SelectionItem {
@@ -6044,6 +6039,9 @@ enum AccountsCommand {
     Use {
         name: String,
     },
+    AddInteractive {
+        method: AccountAddMethod,
+    },
     Add {
         name: String,
         method: AccountAddMethod,
@@ -6089,6 +6087,9 @@ fn parse_accounts_command(input: &str) -> Result<AccountsCommand, String> {
                 }
             }
 
+            if name.is_none() {
+                return Ok(AccountsCommand::AddInteractive { method });
+            }
             let Some(name) = name else {
                 return Err(
                     "Usage: /accounts add [--device-auth] [--overwrite] [--no-set-active] <name>"
