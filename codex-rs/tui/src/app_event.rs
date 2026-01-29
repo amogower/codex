@@ -98,6 +98,14 @@ pub(crate) enum AppEvent {
     /// Result of prefetching connectors.
     ConnectorsLoaded(Result<ConnectorsSnapshot, String>),
 
+    /// Switch to a specific profile in the account pool (auth rotation).
+    SwitchAccountPoolProfile {
+        name: String,
+    },
+
+    /// Rotate to the next enabled profile in the account pool (auth rotation).
+    RotateAccountPoolProfile,
+
     /// Result of computing a `/diff` command.
     DiffResult(String),
 

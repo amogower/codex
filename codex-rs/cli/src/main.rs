@@ -31,10 +31,12 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use supports_color::Stream;
 
+mod accounts;
 mod mcp_cmd;
 #[cfg(not(windows))]
 mod wsl_paths;
 
+use crate::accounts::AccountsCli;
 use crate::mcp_cmd::McpCli;
 
 use codex_core::config::Config;
@@ -85,6 +87,9 @@ enum Subcommand {
 
     /// Manage login.
     Login(LoginCommand),
+
+    /// Manage a local pool of multiple authenticated accounts.
+    Accounts(AccountsCli),
 
     /// Remove stored authentication credentials.
     Logout(LogoutCommand),
@@ -610,6 +615,13 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                     }
                 }
             }
+        }
+        Some(Subcommand::Accounts(mut accounts_cli)) => {
+            prepend_config_flags(
+                &mut accounts_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            accounts_cli.run().await?;
         }
         Some(Subcommand::Logout(mut logout_cli)) => {
             prepend_config_flags(

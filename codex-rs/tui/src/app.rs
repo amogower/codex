@@ -36,6 +36,8 @@ use codex_app_server_protocol::ConfigLayerSource;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
+use codex_core::auth::pool::AccountPool;
+use codex_core::auth::pool::RotateReason;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
@@ -1534,6 +1536,62 @@ impl App {
             }
             AppEvent::ConnectorsLoaded(result) => {
                 self.chat_widget.on_connectors_loaded(result);
+            }
+            AppEvent::SwitchAccountPoolProfile { name } => {
+                let pool = AccountPool::new(self.config.codex_home.clone());
+                let before_active = pool.list_profiles().ok().and_then(|(active, _)| active);
+
+                match pool.set_active_profile(&name, self.config.cli_auth_credentials_store_mode) {
+                    Ok(()) => {
+                        self.auth_manager.reload();
+                        self.chat_widget.on_auth_changed();
+
+                        if before_active.as_deref() == Some(name.as_str()) {
+                            self.chat_widget
+                                .add_info_message("Account is already active.".to_string(), None);
+                        } else if let Some(before) = before_active.as_deref() {
+                            self.chat_widget.add_info_message(
+                                format!("Switched account {before} → {name}."),
+                                None,
+                            );
+                        } else {
+                            self.chat_widget
+                                .add_info_message(format!("Switched account to {name}."), None);
+                        }
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to switch account: {err}"));
+                    }
+                }
+            }
+            AppEvent::RotateAccountPoolProfile => {
+                let pool = AccountPool::new(self.config.codex_home.clone());
+                match pool.rotate_next(
+                    self.config.cli_auth_credentials_store_mode,
+                    RotateReason::Manual,
+                    None,
+                ) {
+                    Ok(Some(rotation)) => {
+                        self.auth_manager.reload();
+                        self.chat_widget.on_auth_changed();
+                        self.chat_widget.add_info_message(
+                            format!("Rotated account {} → {}.", rotation.from, rotation.to),
+                            None,
+                        );
+                    }
+                    Ok(None) => {
+                        self.chat_widget.add_info_message(
+                            "No rotation performed (pool not configured, only one profile, or all profiles are disabled)."
+                                .to_string(),
+                            None,
+                        );
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to rotate account: {err}"));
+                    }
+                }
             }
             AppEvent::UpdateReasoningEffort(effort) => {
                 self.on_update_reasoning_effort(effort);

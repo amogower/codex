@@ -93,9 +93,11 @@ pub(crate) fn compose_account_display(
     match auth.mode {
         AuthMode::ChatGPT => {
             let email = auth.get_account_email();
-            let plan = plan
-                .map(|plan_type| title_case(format!("{plan_type:?}").as_str()))
-                .or_else(|| Some("Unknown".to_string()));
+            let plan = plan.or_else(|| auth.account_plan_type());
+            let plan = Some(
+                plan.map(|plan_type| title_case(format!("{plan_type:?}").as_str()))
+                    .unwrap_or_else(|| "Unknown".to_string()),
+            );
             Some(StatusAccountDisplay::ChatGpt { email, plan })
         }
         AuthMode::ApiKey => Some(StatusAccountDisplay::ApiKey),

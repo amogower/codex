@@ -3551,7 +3551,8 @@ async fn run_sampling_request(
         output_schema: turn_context.final_output_json_schema.clone(),
     };
 
-    let mut retries = 0;
+    let mut retries = 0u64;
+    let mut usage_limit_rotations = 0usize;
     loop {
         let err = match try_run_sampling_request(
             Arc::clone(&router),
@@ -3575,6 +3576,18 @@ async fn run_sampling_request(
                 let rate_limits = e.rate_limits.clone();
                 if let Some(rate_limits) = rate_limits {
                     sess.update_rate_limits(&turn_context, rate_limits).await;
+                }
+                if maybe_rotate_account_pool_on_usage_limit(
+                    &sess,
+                    &turn_context,
+                    client_session,
+                    &mut retries,
+                    &mut usage_limit_rotations,
+                    e.resets_at,
+                )
+                .await
+                {
+                    continue;
                 }
                 return Err(CodexErr::UsageLimitReached(e));
             }
@@ -3623,6 +3636,50 @@ async fn run_sampling_request(
             tokio::time::sleep(delay).await;
         } else {
             return Err(err);
+        }
+    }
+}
+
+async fn maybe_rotate_account_pool_on_usage_limit(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    client_session: &mut ModelClientSession,
+    retries: &mut u64,
+    usage_limit_rotations: &mut usize,
+    resets_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> bool {
+    let config = sess.get_config().await;
+    let pool = crate::auth::pool::AccountPool::new(config.codex_home.clone());
+
+    let budget = pool.profile_count().unwrap_or(0);
+    if *usage_limit_rotations >= budget {
+        return false;
+    }
+
+    match pool.rotate_next(
+        config.cli_auth_credentials_store_mode,
+        crate::auth::pool::RotateReason::UsageLimitReached,
+        resets_at,
+    ) {
+        Ok(Some(rotation)) => {
+            *usage_limit_rotations += 1;
+            *retries = 0;
+            sess.services.auth_manager.reload();
+            *client_session = turn_context.client.new_session();
+            sess.notify_background_event(
+                turn_context,
+                format!(
+                    "Usage limit reached; switching account {} → {}",
+                    rotation.from, rotation.to
+                ),
+            )
+            .await;
+            true
+        }
+        Ok(None) => false,
+        Err(err) => {
+            warn!("Account pool rotation failed: {err}");
+            false
         }
     }
 }

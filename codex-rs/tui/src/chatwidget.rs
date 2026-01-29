@@ -203,6 +203,7 @@ use codex_common::approval_presets::builtin_approval_presets;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
+use codex_core::auth::pool::AccountPool;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_file_search::FileMatch;
@@ -1136,6 +1137,16 @@ impl ChatWidget {
         } else {
             self.rate_limit_snapshot = None;
         }
+    }
+
+    pub(crate) fn on_auth_changed(&mut self) {
+        self.stop_rate_limit_poller();
+        self.rate_limit_snapshot = None;
+        self.plan_type = None;
+        self.rate_limit_warnings = RateLimitWarningState::default();
+        self.rate_limit_switch_prompt = RateLimitSwitchPromptState::default();
+        self.prefetch_rate_limits();
+        self.request_redraw();
     }
     /// Finalize any active exec as failed and stop/clear agent-turn UI state.
     ///
@@ -2725,6 +2736,9 @@ impl ChatWidget {
             SlashCommand::Status => {
                 self.add_status_output();
             }
+            SlashCommand::Accounts => {
+                self.open_accounts_popup();
+            }
             SlashCommand::Ps => {
                 self.add_ps_output();
             }
@@ -3546,6 +3560,105 @@ impl ChatWidget {
             }
         };
         self.open_model_popup_with_presets(presets);
+    }
+
+    pub(crate) fn open_accounts_popup(&mut self) {
+        let pool = AccountPool::new(self.config.codex_home.clone());
+        if !pool.is_configured() {
+            self.add_info_message(
+                "No account pool configured yet. Use `codex accounts add <name>` in another terminal to add accounts."
+                    .to_string(),
+                None,
+            );
+            return;
+        }
+
+        let (active, profiles) = match pool.list_profiles() {
+            Ok(result) => result,
+            Err(err) => {
+                self.add_error_message(format!("Failed to load account pool: {err}"));
+                return;
+            }
+        };
+
+        if profiles.is_empty() {
+            self.add_info_message(
+                "No profiles in the account pool. Use `codex accounts add <name>` to add one."
+                    .to_string(),
+                None,
+            );
+            return;
+        }
+
+        let mut header = ColumnRenderable::new();
+        header.push(Line::from("Accounts".bold()));
+        header.push(Line::from(
+            "Choose which ChatGPT account to use for new turns.".dim(),
+        ));
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+
+        let rotate_actions: Vec<SelectionAction> =
+            vec![Box::new(|tx| tx.send(AppEvent::RotateAccountPoolProfile))];
+        items.push(SelectionItem {
+            name: "Rotate to next account".to_string(),
+            description: Some("Skips temporarily disabled accounts.".to_string()),
+            actions: rotate_actions,
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        for status in profiles {
+            let profile_name = status.name.clone();
+            let actions: Vec<SelectionAction> = vec![Box::new({
+                let profile_name = profile_name.clone();
+                move |tx| {
+                    tx.send(AppEvent::SwitchAccountPoolProfile {
+                        name: profile_name.clone(),
+                    });
+                }
+            })];
+
+            let is_current = active.as_deref() == Some(status.name.as_str());
+
+            let mut detail_parts: Vec<String> = Vec::new();
+            if let Some(mode) = status.mode {
+                detail_parts.push(format!("{mode:?}"));
+            }
+            if let Some(account_id) = status.account_id.as_deref() {
+                detail_parts.push(format!("account_id={account_id}"));
+            }
+            if let Some(until) = status.disabled_until {
+                detail_parts.push(format!("disabled until {}", until.to_rfc3339()));
+            }
+            let description = (!detail_parts.is_empty()).then_some(detail_parts.join(" · "));
+
+            let mut search_value = status.name.clone();
+            if let Some(account_id) = status.account_id.as_deref() {
+                search_value.push(' ');
+                search_value.push_str(account_id);
+            }
+
+            items.push(SelectionItem {
+                name: status.name,
+                description,
+                is_current,
+                actions,
+                dismiss_on_select: true,
+                search_value: Some(search_value),
+                ..Default::default()
+            });
+        }
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            header: Box::new(header),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            is_searchable: true,
+            search_placeholder: Some("Search accounts".to_string()),
+            ..Default::default()
+        });
+        self.request_redraw();
     }
 
     pub(crate) fn open_personality_popup(&mut self) {
