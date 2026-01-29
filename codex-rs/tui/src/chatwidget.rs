@@ -3600,15 +3600,6 @@ impl ChatWidget {
 
     pub(crate) fn open_accounts_popup(&mut self) {
         let pool = AccountPool::new(self.config.codex_home.clone());
-        if !pool.is_configured() {
-            self.add_info_message(
-                "No account pool configured yet. Use `/accounts add <name>` to add a ChatGPT account."
-                    .to_string(),
-                None,
-            );
-            return;
-        }
-
         let (active, profiles) = match pool.list_profiles() {
             Ok(result) => result,
             Err(err) => {
@@ -3616,15 +3607,6 @@ impl ChatWidget {
                 return;
             }
         };
-
-        if profiles.is_empty() {
-            self.add_info_message(
-                "No profiles in the account pool. Use `/accounts add <name>` to add one."
-                    .to_string(),
-                None,
-            );
-            return;
-        }
 
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Accounts".bold()));
