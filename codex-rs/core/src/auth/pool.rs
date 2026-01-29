@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::path_utils::write_atomically;
+use crate::token_data::TokenData;
 
 use super::AuthCredentialsStoreMode;
 use super::storage::create_auth_storage;
@@ -242,9 +243,6 @@ impl AccountPool {
         let Some(active_tokens) = active_auth.tokens.as_ref() else {
             return Ok(());
         };
-        let Some(active_account_id) = active_tokens.account_id.as_deref() else {
-            return Ok(());
-        };
 
         let profile_home = self.profile_codex_home(&active_profile)?;
         let profile_storage = create_auth_storage(profile_home, AuthCredentialsStoreMode::File);
@@ -254,11 +252,7 @@ impl AccountPool {
         let Some(profile_tokens) = profile_auth.tokens.as_ref() else {
             return Ok(());
         };
-        let Some(profile_account_id) = profile_tokens.account_id.as_deref() else {
-            return Ok(());
-        };
-
-        if profile_account_id != active_account_id {
+        if !tokens_appear_to_match(active_tokens, profile_tokens) {
             return Ok(());
         }
 
@@ -393,7 +387,7 @@ fn next_enabled_profile(pool: &PoolFileV1, current: &str, now: DateTime<Utc>) ->
         return None;
     }
 
-    for offset in 1..=pool.order.len() {
+    for offset in 1..pool.order.len() {
         let name = pool.order[(idx + offset) % pool.order.len()].clone();
         let disabled_until = pool.profiles.get(&name).and_then(|m| m.disabled_until);
         if disabled_until.is_some_and(|t| t > now) {
@@ -402,6 +396,37 @@ fn next_enabled_profile(pool: &PoolFileV1, current: &str, now: DateTime<Utc>) ->
         return Some(name);
     }
     None
+}
+
+fn tokens_appear_to_match(active: &TokenData, profile: &TokenData) -> bool {
+    if let (Some(active), Some(profile)) =
+        (active.account_id.as_deref(), profile.account_id.as_deref())
+    {
+        return active == profile;
+    }
+
+    if let (Some(active), Some(profile)) = (
+        active.id_token.chatgpt_user_id.as_deref(),
+        profile.id_token.chatgpt_user_id.as_deref(),
+    ) {
+        return active == profile;
+    }
+
+    if let (Some(active), Some(profile)) = (
+        active.id_token.chatgpt_account_id.as_deref(),
+        profile.id_token.chatgpt_account_id.as_deref(),
+    ) {
+        return active == profile;
+    }
+
+    if let (Some(active), Some(profile)) = (
+        active.id_token.email.as_deref(),
+        profile.id_token.email.as_deref(),
+    ) {
+        return active == profile;
+    }
+
+    false
 }
 
 fn validate_profile_name(name: &str) -> std::io::Result<()> {
@@ -529,5 +554,83 @@ mod tests {
         let raw = pool.load_pool().unwrap().unwrap();
         let until = raw.profiles.get("a").unwrap().disabled_until.unwrap();
         assert_eq!(until, resets_at);
+    }
+
+    #[test]
+    fn manual_rotate_does_not_return_current_when_all_others_disabled() {
+        let dir = tempdir().unwrap();
+        let pool = AccountPool::new(dir.path().to_path_buf());
+
+        pool.upsert_profile("a", true).unwrap();
+        pool.upsert_profile("b", false).unwrap();
+
+        let auth = AuthDotJson {
+            openai_api_key: Some("sk-test".to_string()),
+            tokens: None,
+            last_refresh: None,
+        };
+        write_profile_auth(&pool.profile_codex_home("a").unwrap(), &auth);
+        write_profile_auth(&pool.profile_codex_home("b").unwrap(), &auth);
+
+        let mut raw = pool.load_pool().unwrap().unwrap();
+        raw.profiles.get_mut("b").unwrap().disabled_until = Some(Utc::now() + Duration::days(2));
+        pool.save_pool(&raw).unwrap();
+
+        let rotated = pool
+            .rotate_next(AuthCredentialsStoreMode::File, RotateReason::Manual, None)
+            .unwrap();
+        assert_eq!(rotated, None);
+
+        let (active, _) = pool.list_profiles().unwrap();
+        assert_eq!(active.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn sync_active_profile_writes_back_refresh_even_without_account_id() {
+        let dir = tempdir().unwrap();
+        let pool = AccountPool::new(dir.path().to_path_buf());
+
+        pool.upsert_profile("a", true).unwrap();
+
+        let initial = AuthDotJson {
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    raw_jwt: dummy_jwt(),
+                    ..Default::default()
+                },
+                access_token: "at-1".to_string(),
+                refresh_token: "rt-1".to_string(),
+                account_id: None,
+            }),
+            last_refresh: Some(Utc::now()),
+        };
+        write_profile_auth(&pool.profile_codex_home("a").unwrap(), &initial);
+
+        let refreshed = AuthDotJson {
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    raw_jwt: dummy_jwt(),
+                    ..Default::default()
+                },
+                access_token: "at-2".to_string(),
+                refresh_token: "rt-2".to_string(),
+                account_id: None,
+            }),
+            last_refresh: Some(Utc::now()),
+        };
+        write_profile_auth(&dir.path().to_path_buf(), &refreshed);
+
+        pool.sync_active_profile_from_active_store(AuthCredentialsStoreMode::File)
+            .unwrap();
+
+        let profile_home = pool.profile_codex_home("a").unwrap();
+        let storage = create_auth_storage(profile_home, AuthCredentialsStoreMode::File);
+        let on_disk = storage.load().unwrap().unwrap();
+        let active_storage =
+            create_auth_storage(dir.path().to_path_buf(), AuthCredentialsStoreMode::File);
+        let active_loaded = active_storage.load().unwrap().unwrap();
+        assert_eq!(on_disk, active_loaded);
     }
 }
