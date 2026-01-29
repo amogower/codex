@@ -1545,7 +1545,8 @@ impl App {
             }
             AppEvent::PrefillComposer { text } => {
                 self.chat_widget
-                    .set_composer_text(text, Vec::new(), Vec::new());
+                    .set_composer_text(String::new(), Vec::new(), Vec::new());
+                self.chat_widget.insert_str(text.as_str());
             }
             AppEvent::StartAccountAdd {
                 name,

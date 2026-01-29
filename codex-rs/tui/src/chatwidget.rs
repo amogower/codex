@@ -3620,6 +3620,10 @@ impl ChatWidget {
             tx.send(AppEvent::PrefillComposer {
                 text: "/accounts add ".to_string(),
             });
+            tx.send(AppEvent::AccountAddStatus {
+                message: "Type a profile name and press Enter to start browser login.".to_string(),
+                is_error: false,
+            });
         })];
         items.push(SelectionItem {
             name: "Add account (browser)".to_string(),
@@ -3632,6 +3636,11 @@ impl ChatWidget {
         let add_device_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
             tx.send(AppEvent::PrefillComposer {
                 text: "/accounts add --device-auth ".to_string(),
+            });
+            tx.send(AppEvent::AccountAddStatus {
+                message: "Type a profile name and press Enter to start device-code login."
+                    .to_string(),
+                is_error: false,
             });
         })];
         items.push(SelectionItem {
