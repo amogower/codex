@@ -46,6 +46,12 @@ pub(crate) struct ConnectorsSnapshot {
     pub(crate) connectors: Vec<AppInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccountAddMethod {
+    Browser,
+    DeviceCode,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
@@ -97,6 +103,32 @@ pub(crate) enum AppEvent {
 
     /// Result of prefetching connectors.
     ConnectorsLoaded(Result<ConnectorsSnapshot, String>),
+
+    /// Prefill composer text.
+    PrefillComposer {
+        text: String,
+    },
+
+    /// Begin adding a ChatGPT account to the pool.
+    StartAccountAdd {
+        name: String,
+        method: AccountAddMethod,
+        overwrite: bool,
+        set_active: bool,
+    },
+
+    /// Emit a status line during account add.
+    AccountAddStatus {
+        message: String,
+        is_error: bool,
+    },
+
+    /// Completion of account add flow.
+    AccountAddFinished {
+        name: String,
+        set_active: bool,
+        result: Result<(), String>,
+    },
 
     /// Switch to a specific profile in the account pool (auth rotation).
     SwitchAccountPoolProfile {

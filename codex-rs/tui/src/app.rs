@@ -36,6 +36,7 @@ use codex_app_server_protocol::ConfigLayerSource;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
+use codex_core::auth::CLIENT_ID;
 use codex_core::auth::pool::AccountPool;
 use codex_core::auth::pool::RotateReason;
 use codex_core::config::Config;
@@ -61,8 +62,13 @@ use codex_core::protocol::SkillErrorInfo;
 use codex_core::protocol::TokenUsage;
 #[cfg(target_os = "windows")]
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
+use codex_login::ServerOptions;
+use codex_login::complete_device_code_login;
+use codex_login::request_device_code;
+use codex_login::run_login_server;
 use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -1537,6 +1543,175 @@ impl App {
             AppEvent::ConnectorsLoaded(result) => {
                 self.chat_widget.on_connectors_loaded(result);
             }
+            AppEvent::PrefillComposer { text } => {
+                self.chat_widget
+                    .set_composer_text(text, Vec::new(), Vec::new());
+            }
+            AppEvent::StartAccountAdd {
+                name,
+                method,
+                overwrite,
+                set_active,
+            } => {
+                let config = self.config.clone();
+                let app_event_tx = self.app_event_tx.clone();
+                let auth_manager = self.auth_manager.clone();
+                tokio::spawn(async move {
+                    if matches!(config.forced_login_method, Some(ForcedLoginMethod::Api)) {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: name.clone(),
+                            set_active,
+                            result: Err("ChatGPT login is disabled in this workspace.".to_string()),
+                        });
+                        return;
+                    }
+
+                    let pool = AccountPool::new(config.codex_home.clone());
+                    let profile_home = match pool.profile_codex_home(&name) {
+                        Ok(home) => home,
+                        Err(err) => {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: name.clone(),
+                                set_active,
+                                result: Err(err.to_string()),
+                            });
+                            return;
+                        }
+                    };
+
+                    if !overwrite && profile_home.join("auth.json").is_file() {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: name.clone(),
+                            set_active,
+                            result: Err(format!(
+                                "Profile '{}' already has stored credentials. Use --overwrite to replace them.",
+                                name
+                            )),
+                        });
+                        return;
+                    }
+
+                    let mut opts = ServerOptions::new(
+                        profile_home.clone(),
+                        CLIENT_ID.to_string(),
+                        config.forced_chatgpt_workspace_id.clone(),
+                        codex_core::auth::AuthCredentialsStoreMode::File,
+                    );
+
+                    let login_result = match method {
+                        crate::app_event::AccountAddMethod::Browser => {
+                            let server = match run_login_server(opts) {
+                                Ok(server) => server,
+                                Err(err) => {
+                                    app_event_tx.send(AppEvent::AccountAddFinished {
+                                        name: name.clone(),
+                                        set_active,
+                                        result: Err(err.to_string()),
+                                    });
+                                    return;
+                                }
+                            };
+                            app_event_tx.send(AppEvent::AccountAddStatus {
+                                message: format!(
+                                    "Starting login server on http://localhost:{}.\nIf your browser did not open, navigate to this URL:\n{}",
+                                    server.actual_port, server.auth_url
+                                ),
+                                is_error: false,
+                            });
+                            server.block_until_done().await
+                        }
+                        crate::app_event::AccountAddMethod::DeviceCode => {
+                            opts.open_browser = false;
+                            let device_code = match request_device_code(&opts).await {
+                                Ok(code) => code,
+                                Err(err) => {
+                                    app_event_tx.send(AppEvent::AccountAddFinished {
+                                        name: name.clone(),
+                                        set_active,
+                                        result: Err(err.to_string()),
+                                    });
+                                    return;
+                                }
+                            };
+                            app_event_tx.send(AppEvent::AccountAddStatus {
+                                message: format!(
+                                    "Open {} and enter the one-time code: {}",
+                                    device_code.verification_url, device_code.user_code
+                                ),
+                                is_error: false,
+                            });
+                            complete_device_code_login(opts, device_code).await
+                        }
+                    };
+
+                    if let Err(err) = login_result {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: name.clone(),
+                            set_active,
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+
+                    if let Err(err) = pool.upsert_profile(&name, set_active) {
+                        app_event_tx.send(AppEvent::AccountAddFinished {
+                            name: name.clone(),
+                            set_active,
+                            result: Err(err.to_string()),
+                        });
+                        return;
+                    }
+
+                    if set_active {
+                        if let Err(err) =
+                            pool.set_active_profile(&name, config.cli_auth_credentials_store_mode)
+                        {
+                            app_event_tx.send(AppEvent::AccountAddFinished {
+                                name: name.clone(),
+                                set_active,
+                                result: Err(err.to_string()),
+                            });
+                            return;
+                        }
+                        auth_manager.reload();
+                    }
+
+                    app_event_tx.send(AppEvent::AccountAddFinished {
+                        name,
+                        set_active,
+                        result: Ok(()),
+                    });
+                });
+            }
+            AppEvent::AccountAddStatus { message, is_error } => {
+                if is_error {
+                    self.chat_widget.add_error_message(message);
+                } else {
+                    self.chat_widget.add_info_message(message, None);
+                }
+            }
+            AppEvent::AccountAddFinished {
+                name,
+                set_active,
+                result,
+            } => match result {
+                Ok(()) => {
+                    if set_active {
+                        self.chat_widget.on_auth_changed();
+                        self.chat_widget.add_info_message(
+                            format!("Saved and activated account '{name}'."),
+                            None,
+                        );
+                    } else {
+                        self.chat_widget
+                            .add_info_message(format!("Saved account '{name}'."), None);
+                    }
+                }
+                Err(err) => {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to add account '{name}': {err}"));
+                }
+            },
             AppEvent::SwitchAccountPoolProfile { name } => {
                 let pool = AccountPool::new(self.config.codex_home.clone());
                 let before_active = pool.list_profiles().ok().and_then(|(active, _)| active);

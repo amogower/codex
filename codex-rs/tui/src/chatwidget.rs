@@ -131,6 +131,7 @@ const PLAN_IMPLEMENTATION_YES: &str = "Yes, implement this plan";
 const PLAN_IMPLEMENTATION_NO: &str = "No, stay in Plan mode";
 const PLAN_IMPLEMENTATION_CODING_MESSAGE: &str = "Implement the plan.";
 
+use crate::app_event::AccountAddMethod;
 use crate::app_event::AppEvent;
 use crate::app_event::ConnectorsSnapshot;
 use crate::app_event::ExitMode;
@@ -210,6 +211,7 @@ use codex_file_search::FileMatch;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use shlex;
 use strum::IntoEnumIterator;
 
 const USER_SHELL_COMMAND_HELP_TITLE: &str = "Prefix a command with ! to run it locally";
@@ -2812,6 +2814,40 @@ impl ChatWidget {
 
         let trimmed = args.trim();
         match cmd {
+            SlashCommand::Accounts => {
+                if trimmed.is_empty() {
+                    self.open_accounts_popup();
+                    return;
+                }
+                match parse_accounts_command(trimmed) {
+                    Ok(AccountsCommand::Add {
+                        name,
+                        method,
+                        overwrite,
+                        set_active,
+                    }) => {
+                        self.app_event_tx.send(AppEvent::StartAccountAdd {
+                            name,
+                            method,
+                            overwrite,
+                            set_active,
+                        });
+                    }
+                    Ok(AccountsCommand::Use { name }) => {
+                        self.app_event_tx
+                            .send(AppEvent::SwitchAccountPoolProfile { name });
+                    }
+                    Ok(AccountsCommand::Rotate) => {
+                        self.app_event_tx.send(AppEvent::RotateAccountPoolProfile);
+                    }
+                    Ok(AccountsCommand::List) => {
+                        self.open_accounts_popup();
+                    }
+                    Err(message) => {
+                        self.add_error_message(message);
+                    }
+                }
+            }
             SlashCommand::Collab => {
                 let _ = trimmed;
                 if self.collaboration_modes_enabled() {
@@ -3566,7 +3602,7 @@ impl ChatWidget {
         let pool = AccountPool::new(self.config.codex_home.clone());
         if !pool.is_configured() {
             self.add_info_message(
-                "No account pool configured yet. Use `codex accounts add <name>` in another terminal to add accounts."
+                "No account pool configured yet. Use `/accounts add <name>` to add a ChatGPT account."
                     .to_string(),
                 None,
             );
@@ -3583,7 +3619,7 @@ impl ChatWidget {
 
         if profiles.is_empty() {
             self.add_info_message(
-                "No profiles in the account pool. Use `codex accounts add <name>` to add one."
+                "No profiles in the account pool. Use `/accounts add <name>` to add one."
                     .to_string(),
                 None,
             );
@@ -3597,6 +3633,32 @@ impl ChatWidget {
         ));
 
         let mut items: Vec<SelectionItem> = Vec::new();
+
+        let add_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::PrefillComposer {
+                text: "/accounts add ".to_string(),
+            });
+        })];
+        items.push(SelectionItem {
+            name: "Add account (browser)".to_string(),
+            description: Some("Opens a local login server and browser sign-in.".to_string()),
+            actions: add_actions,
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        let add_device_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::PrefillComposer {
+                text: "/accounts add --device-auth ".to_string(),
+            });
+        })];
+        items.push(SelectionItem {
+            name: "Add account (device code)".to_string(),
+            description: Some("Use a one-time device code instead of a local browser.".to_string()),
+            actions: add_device_actions,
+            dismiss_on_select: true,
+            ..Default::default()
+        });
 
         let rotate_actions: Vec<SelectionAction> =
             vec![Box::new(|tx| tx.send(AppEvent::RotateAccountPoolProfile))];
@@ -5981,6 +6043,76 @@ async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Option<RateLimi
             debug!(error = ?err, "failed to construct backend client for rate limits");
             None
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AccountsCommand {
+    List,
+    Rotate,
+    Use {
+        name: String,
+    },
+    Add {
+        name: String,
+        method: AccountAddMethod,
+        overwrite: bool,
+        set_active: bool,
+    },
+}
+
+fn parse_accounts_command(input: &str) -> Result<AccountsCommand, String> {
+    let args = shlex::split(input).ok_or_else(|| "Unable to parse /accounts args.".to_string())?;
+    if args.is_empty() {
+        return Ok(AccountsCommand::List);
+    }
+
+    match args[0].as_str() {
+        "list" => Ok(AccountsCommand::List),
+        "rotate" => Ok(AccountsCommand::Rotate),
+        "use" => {
+            let name = args
+                .get(1)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Usage: /accounts use <name>".to_string())?;
+            Ok(AccountsCommand::Use { name: name.clone() })
+        }
+        "add" => {
+            let mut method = AccountAddMethod::Browser;
+            let mut overwrite = false;
+            let mut set_active = true;
+            let mut name = None;
+
+            for arg in args.iter().skip(1) {
+                match arg.as_str() {
+                    "--device-auth" => method = AccountAddMethod::DeviceCode,
+                    "--overwrite" => overwrite = true,
+                    "--no-set-active" => set_active = false,
+                    _ if arg.starts_with('-') => {
+                        return Err(format!("Unknown flag: {arg}"));
+                    }
+                    _ if name.is_none() => name = Some(arg.clone()),
+                    _ => {
+                        return Err("Usage: /accounts add [--device-auth] [--overwrite] [--no-set-active] <name>".to_string());
+                    }
+                }
+            }
+
+            let Some(name) = name else {
+                return Err(
+                    "Usage: /accounts add [--device-auth] [--overwrite] [--no-set-active] <name>"
+                        .to_string(),
+                );
+            };
+
+            Ok(AccountsCommand::Add {
+                name,
+                method,
+                overwrite,
+                set_active,
+            })
+        }
+        _ => Err("Usage: /accounts [list|add|use|rotate]".to_string()),
     }
 }
 
