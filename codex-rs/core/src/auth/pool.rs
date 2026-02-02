@@ -272,7 +272,7 @@ impl AccountPool {
         };
 
         let mode = if auth.tokens.is_some() {
-            Some(codex_app_server_protocol::AuthMode::ChatGPT)
+            Some(codex_app_server_protocol::AuthMode::Chatgpt)
         } else if auth.openai_api_key.is_some() {
             Some(codex_app_server_protocol::AuthMode::ApiKey)
         } else {
@@ -530,7 +530,7 @@ mod tests {
         pool.upsert_profile("b", false).unwrap();
 
         let auth = AuthDotJson {
-            auth_mode: Some(AuthMode::ChatGPT),
+            auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
@@ -568,6 +568,7 @@ mod tests {
         pool.upsert_profile("b", false).unwrap();
 
         let auth = AuthDotJson {
+            auth_mode: Some(AuthMode::ApiKey),
             openai_api_key: Some("sk-test".to_string()),
             tokens: None,
             last_refresh: None,
@@ -596,6 +597,7 @@ mod tests {
         pool.upsert_profile("a", true).unwrap();
 
         let initial = AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
@@ -611,6 +613,7 @@ mod tests {
         write_profile_auth(&pool.profile_codex_home("a").unwrap(), &initial);
 
         let refreshed = AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
